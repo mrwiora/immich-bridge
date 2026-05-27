@@ -1,0 +1,28 @@
+{
+  "instances": {
+    "home": {
+      "url": "https://immich-home.example.com/api",
+      "api_key": "your-home-api-key"
+    },
+    "backup": {
+      "url": "https://immich-backup.example.com/api",
+      "api_key": "your-backup-api-key"
+    }
+  },
+  "sync_rules": [
+    {
+      "name": "family-photos-mirror",
+      "source": {
+        "instance": "home",
+        "album_name": "Family Photos"
+      },
+      "destination": {
+        "instance": "backup",
+        "album_name": "Family Photos Mirror"
+      },
+      "delete_from_source": false
+    }
+  ],
+  "poll_interval": "5m",
+  "log_level": "info"
+}
