@@ -11,7 +11,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -69,9 +68,6 @@ type AlbumInfo struct {
 	ID         string `json:"id"`
 	AlbumName  string `json:"albumName"`
 	AssetCount int    `json:"assetCount"`
-	// Assets is only populated by older Immich servers. Newer releases no
-	// longer embed assets in the album response; use GetAlbumAssets instead.
-	Assets []AlbumAsset `json:"assets"`
 }
 
 type AlbumAsset struct {
@@ -88,27 +84,64 @@ type AssetInfo struct {
 	FileModifiedAt   string    `json:"fileModifiedAt"`
 	IsFavorite       bool      `json:"isFavorite"`
 	Visibility       string    `json:"visibility"`
-	Rating           int       `json:"rating"`
 	ExifInfo         *ExifInfo `json:"exifInfo,omitempty"`
 }
 
 type ExifInfo struct {
 	Description string `json:"description,omitempty"`
+	Rating      *int   `json:"rating,omitempty"`
 }
 
+// metadataSearchRequest uses the structured search shape introduced in
+// Immich v3.2.0. It must not be mixed with the deprecated flat fields.
 type metadataSearchRequest struct {
-	AlbumIDs []string `json:"albumIds"`
-	Size     int      `json:"size"`
-	Page     int      `json:"page,omitempty"`
-	Cursor   string   `json:"cursor,omitempty"`
+	Filter searchFilter `json:"filter"`
+	Size   int          `json:"size"`
+	Cursor string       `json:"cursor,omitempty"`
+}
+
+type searchFilter struct {
+	AlbumIDs  idsFilter        `json:"albumIds"`
+	TrashedAt dateFilterNullEq `json:"trashedAt"`
+}
+
+type idsFilter struct {
+	Any []string `json:"any"`
+}
+
+// dateFilterNullEq always serializes as {"eq": null}, matching assets whose
+// date is unset (e.g. trashedAt == null → not in trash).
+type dateFilterNullEq struct {
+	Eq *string `json:"eq"`
 }
 
 type metadataSearchResponse struct {
 	Assets struct {
 		Items      []AlbumAsset `json:"items"`
-		NextPage   *string      `json:"nextPage"`
 		NextCursor *string      `json:"nextCursor"`
 	} `json:"assets"`
+}
+
+// ServerVersion is the semantic version reported by GET /server/version.
+type ServerVersion struct {
+	Major int `json:"major"`
+	Minor int `json:"minor"`
+	Patch int `json:"patch"`
+}
+
+func (v ServerVersion) String() string {
+	return fmt.Sprintf("v%d.%d.%d", v.Major, v.Minor, v.Patch)
+}
+
+// AtLeast reports whether v is greater than or equal to major.minor.patch.
+func (v ServerVersion) AtLeast(major, minor, patch int) bool {
+	if v.Major != major {
+		return v.Major > major
+	}
+	if v.Minor != minor {
+		return v.Minor > minor
+	}
+	return v.Patch >= patch
 }
 
 type BulkCheckAsset struct {
@@ -240,6 +273,14 @@ func (c *ImmichClient) PingServer(ctx context.Context) error {
 	return nil
 }
 
+func (c *ImmichClient) GetServerVersion(ctx context.Context) (*ServerVersion, error) {
+	var v ServerVersion
+	if err := c.doJSON(ctx, http.MethodGet, "/server/version", nil, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
 func (c *ImmichClient) GetAllAlbums(ctx context.Context) ([]Album, error) {
 	var albums []Album
 	if err := c.doJSON(ctx, http.MethodGet, "/albums", nil, &albums); err != nil {
@@ -256,26 +297,23 @@ func (c *ImmichClient) GetAlbumInfo(ctx context.Context, albumID string) (*Album
 	return &info, nil
 }
 
-// GetAlbumAssets returns all assets contained in an album.
-//
-// Older Immich servers embedded the asset list in GET /albums/{id}; newer ones
-// only return metadata (incl. assetCount), so the assets are fetched via
-// POST /search/metadata filtered by album ID.
+// GetAlbumAssets returns all non-trashed assets contained in an album, using
+// the structured search API (POST /search/metadata with a filter), which
+// requires Immich v3.2.0 or newer.
 func (c *ImmichClient) GetAlbumAssets(ctx context.Context, albumID string) ([]AlbumAsset, error) {
 	info, err := c.GetAlbumInfo(ctx, albumID)
 	if err != nil {
 		return nil, err
 	}
-	if len(info.Assets) > 0 {
-		return info.Assets, nil
-	}
 	if info.AssetCount == 0 {
 		return nil, nil
 	}
 
-	const pageSize = 1000
 	var assets []AlbumAsset
-	req := metadataSearchRequest{AlbumIDs: []string{albumID}, Size: pageSize, Page: 1}
+	req := metadataSearchRequest{
+		Filter: searchFilter{AlbumIDs: idsFilter{Any: []string{albumID}}},
+		Size:   1000,
+	}
 
 	for {
 		var resp metadataSearchResponse
@@ -291,20 +329,10 @@ func (c *ImmichClient) GetAlbumAssets(ctx context.Context, albumID string) ([]Al
 				albumID, len(assets), info.AssetCount)
 		}
 
-		switch {
-		case resp.Assets.NextCursor != nil && *resp.Assets.NextCursor != "":
-			req.Page = 0
-			req.Cursor = *resp.Assets.NextCursor
-		case resp.Assets.NextPage != nil && *resp.Assets.NextPage != "":
-			next, err := strconv.Atoi(*resp.Assets.NextPage)
-			if err != nil {
-				return nil, fmt.Errorf("invalid nextPage %q: %w", *resp.Assets.NextPage, err)
-			}
-			req.Cursor = ""
-			req.Page = next
-		default:
+		if resp.Assets.NextCursor == nil || *resp.Assets.NextCursor == "" {
 			return assets, nil
 		}
+		req.Cursor = *resp.Assets.NextCursor
 	}
 }
 
@@ -363,11 +391,8 @@ func (c *ImmichClient) UploadAsset(
 		return nil, fmt.Errorf("writing file data: %w", err)
 	}
 
-	// Required device fields
-	writer.WriteField("deviceAssetId", fileName+"-"+checksum)
-	writer.WriteField("deviceId", "immich-bridge")
-
 	// Form fields
+	writer.WriteField("filename", fileName)
 	writer.WriteField("fileCreatedAt", fileCreatedAt)
 	writer.WriteField("fileModifiedAt", fileModifiedAt)
 	if isFavorite {
@@ -425,7 +450,7 @@ func (c *ImmichClient) AddAssetsToAlbum(ctx context.Context, albumID string, ass
 }
 
 func (c *ImmichClient) UpdateAsset(ctx context.Context, assetID string, dto UpdateAssetDTO) error {
-	return c.doJSON(ctx, http.MethodPut, "/assets/"+assetID, dto, nil)
+	return c.doJSON(ctx, http.MethodPatch, "/assets/"+assetID, dto, nil)
 }
 
 func (c *ImmichClient) DeleteAssets(ctx context.Context, assetIDs []string) error {

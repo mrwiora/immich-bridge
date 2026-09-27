@@ -17,6 +17,13 @@ import (
 	"immich-bridge/discovery"
 )
 
+// Minimum supported Immich server version (structured search API).
+const (
+	minServerMajor = 3
+	minServerMinor = 2
+	minServerPatch = 0
+)
+
 // Bridge orchestrates syncing assets between Immich instances.
 type Bridge struct {
 	config     *config.Config
@@ -47,7 +54,15 @@ func (b *Bridge) Validate(ctx context.Context) error {
 		if err := c.PingServer(ctx); err != nil {
 			return fmt.Errorf("instance %q: %w", name, err)
 		}
-		slog.Info("instance reachable", "instance", name)
+		version, err := c.GetServerVersion(ctx)
+		if err != nil {
+			return fmt.Errorf("instance %q: getting server version: %w", name, err)
+		}
+		if !version.AtLeast(minServerMajor, minServerMinor, minServerPatch) {
+			return fmt.Errorf("instance %q: Immich %s is not supported, v%d.%d.%d or newer is required",
+				name, version, minServerMajor, minServerMinor, minServerPatch)
+		}
+		slog.Info("instance reachable", "instance", name, "version", version.String())
 	}
 	return nil
 }
@@ -380,9 +395,8 @@ func (b *Bridge) transferAsset(
 		dto.Description = info.ExifInfo.Description
 		hasUpdate = true
 	}
-	if info.Rating > 0 {
-		rating := info.Rating
-		dto.Rating = &rating
+	if info.ExifInfo != nil && info.ExifInfo.Rating != nil && *info.ExifInfo.Rating != 0 {
+		dto.Rating = info.ExifInfo.Rating
 		hasUpdate = true
 	}
 
