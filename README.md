@@ -2,6 +2,8 @@
 
 A Go CLI/service that syncs photos between multiple [Immich](https://immich.app) instances. Name an album `export_<target>_<name>` and the bridge automatically transfers its assets to the target instance — no config changes needed.
 
+**Requires Immich v3.2.0 or newer** on every configured instance (the bridge uses the structured search API). `validate`, `sync`, `daemon` and `status` refuse to run against older servers.
+
 ## How it works
 
 ```
