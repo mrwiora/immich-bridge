@@ -160,7 +160,7 @@ func (b *Bridge) Status(ctx context.Context) error {
 			fmt.Printf("    Pending assets:    (error: %v)\n", err)
 			continue
 		}
-		fmt.Printf("    Pending assets:    %d\n", len(albumInfo.Assets))
+		fmt.Printf("    Pending assets:    %d\n", albumInfo.AssetCount)
 	}
 
 	return nil
@@ -187,22 +187,22 @@ func (b *Bridge) syncRule(ctx context.Context, rule config.SyncRule) error {
 	}
 
 	// List assets in source album
-	albumInfo, err := sourceClient.GetAlbumInfo(ctx, sourceAlbumID)
+	sourceAssets, err := sourceClient.GetAlbumAssets(ctx, sourceAlbumID)
 	if err != nil {
-		return fmt.Errorf("getting source album info: %w", err)
+		return fmt.Errorf("listing source album assets: %w", err)
 	}
 
-	if len(albumInfo.Assets) == 0 {
+	if len(sourceAssets) == 0 {
 		slog.Info("nothing to sync", "rule", rule.Name)
 		return nil
 	}
 
 	slog.Info("found assets in source album",
-		"rule", rule.Name, "count", len(albumInfo.Assets))
+		"rule", rule.Name, "count", len(sourceAssets))
 
 	// Bulk-upload check: which assets already exist on destination?
-	checkAssets := make([]client.BulkCheckAsset, len(albumInfo.Assets))
-	for i, a := range albumInfo.Assets {
+	checkAssets := make([]client.BulkCheckAsset, len(sourceAssets))
+	for i, a := range sourceAssets {
 		checkAssets[i] = client.BulkCheckAsset{
 			ID:       a.ID,
 			Checksum: a.Checksum,
@@ -225,7 +225,7 @@ func (b *Bridge) syncRule(ctx context.Context, rule config.SyncRule) error {
 			}
 		}
 	} else {
-		for _, a := range albumInfo.Assets {
+		for _, a := range sourceAssets {
 			needsUpload = append(needsUpload, a.ID)
 		}
 	}
