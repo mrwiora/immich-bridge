@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -65,9 +66,12 @@ type Album struct {
 }
 
 type AlbumInfo struct {
-	ID        string       `json:"id"`
-	AlbumName string       `json:"albumName"`
-	Assets    []AlbumAsset `json:"assets"`
+	ID         string `json:"id"`
+	AlbumName  string `json:"albumName"`
+	AssetCount int    `json:"assetCount"`
+	// Assets is only populated by older Immich servers. Newer releases no
+	// longer embed assets in the album response; use GetAlbumAssets instead.
+	Assets []AlbumAsset `json:"assets"`
 }
 
 type AlbumAsset struct {
@@ -90,6 +94,21 @@ type AssetInfo struct {
 
 type ExifInfo struct {
 	Description string `json:"description,omitempty"`
+}
+
+type metadataSearchRequest struct {
+	AlbumIDs []string `json:"albumIds"`
+	Size     int      `json:"size"`
+	Page     int      `json:"page,omitempty"`
+	Cursor   string   `json:"cursor,omitempty"`
+}
+
+type metadataSearchResponse struct {
+	Assets struct {
+		Items      []AlbumAsset `json:"items"`
+		NextPage   *string      `json:"nextPage"`
+		NextCursor *string      `json:"nextCursor"`
+	} `json:"assets"`
 }
 
 type BulkCheckAsset struct {
@@ -235,6 +254,58 @@ func (c *ImmichClient) GetAlbumInfo(ctx context.Context, albumID string) (*Album
 		return nil, err
 	}
 	return &info, nil
+}
+
+// GetAlbumAssets returns all assets contained in an album.
+//
+// Older Immich servers embedded the asset list in GET /albums/{id}; newer ones
+// only return metadata (incl. assetCount), so the assets are fetched via
+// POST /search/metadata filtered by album ID.
+func (c *ImmichClient) GetAlbumAssets(ctx context.Context, albumID string) ([]AlbumAsset, error) {
+	info, err := c.GetAlbumInfo(ctx, albumID)
+	if err != nil {
+		return nil, err
+	}
+	if len(info.Assets) > 0 {
+		return info.Assets, nil
+	}
+	if info.AssetCount == 0 {
+		return nil, nil
+	}
+
+	const pageSize = 1000
+	var assets []AlbumAsset
+	req := metadataSearchRequest{AlbumIDs: []string{albumID}, Size: pageSize, Page: 1}
+
+	for {
+		var resp metadataSearchResponse
+		if err := c.doJSON(ctx, http.MethodPost, "/search/metadata", req, &resp); err != nil {
+			return nil, fmt.Errorf("searching assets of album %s: %w", albumID, err)
+		}
+		assets = append(assets, resp.Assets.Items...)
+
+		// Safety net: if the server ignored the album filter we would get
+		// unrelated assets back, which must never be synced (and deleted).
+		if len(assets) > info.AssetCount {
+			return nil, fmt.Errorf("album %s: search returned more assets (%d) than the album contains (%d); refusing to continue",
+				albumID, len(assets), info.AssetCount)
+		}
+
+		switch {
+		case resp.Assets.NextCursor != nil && *resp.Assets.NextCursor != "":
+			req.Page = 0
+			req.Cursor = *resp.Assets.NextCursor
+		case resp.Assets.NextPage != nil && *resp.Assets.NextPage != "":
+			next, err := strconv.Atoi(*resp.Assets.NextPage)
+			if err != nil {
+				return nil, fmt.Errorf("invalid nextPage %q: %w", *resp.Assets.NextPage, err)
+			}
+			req.Cursor = ""
+			req.Page = next
+		default:
+			return assets, nil
+		}
+	}
 }
 
 func (c *ImmichClient) GetAssetInfo(ctx context.Context, assetID string) (*AssetInfo, error) {
